@@ -1,0 +1,631 @@
+#!/usr/bin/env python3
+"""
+Simple command line query tool.
+
+J.Cornmell, GPL - 2021.
+
+If you can connect via JDBC this should work. Allows you to query any database
+on the command line easily. The output is formatted into various output
+formats.
+
+"""
+
+import argparse
+from datetime import datetime
+import json
+from pathlib import Path
+import re
+import sys
+from tabulate import tabulate
+
+import configparser
+import jaydebeapi
+import xlsxwriter
+
+###############################################################################
+tab_title = ""
+PROP_FILE = str(Path.home()) + "/.ssh/secret_keys/query.properties"
+QUERY_VERSION = "v0.1"
+
+
+class QueryCli:
+    """ Command line tool """
+
+    def __init__(self):
+        self.workbook = None
+        self.out_file = None
+        self.args = None
+        self.cursor = None
+
+    def set_args(self, some_args):
+        """ Setup arguments. """
+        self.args = some_args
+
+    @staticmethod
+    def clean_query(aquery):
+        """ Cleanup a query """
+        return aquery.replace("\n", " ").replace("  ", " ").strip()
+
+    def is_a_file_of_type(self, file_types):
+        """ Decide is a file is of a type """
+        for file_type in file_types:
+            if self.args.output.endswith("." + file_type):
+                return True
+
+        return False
+
+    def output_line(self, i_or_str):
+        """ Output a line to the output file """
+        a_string = str(i_or_str).strip()
+
+        if self.args.output:
+            if self.is_a_file_of_type(["html"]):
+                self.out_file.write(a_string + "<br/>\n")
+            elif self.is_a_file_of_type(["sql"]):
+                if not a_string.strip().startswith("--"):
+                    self.out_file.write("-- ")
+
+                self.out_file.write(a_string + "\n")
+            elif self.is_a_file_of_type(["csv"]):
+                self.out_file.write(a_string + "\n")
+
+            if self.args.verbose:
+                print(i_or_str)
+        else:
+            print(a_string)
+
+    @staticmethod
+    def db_choices():
+        """ Get a list of the database possibilities """
+        db_choice_list = []
+
+        for line in open(PROP_FILE, "r"):
+            if line.startswith("[db."):
+                line = line.strip().replace("[db.", "")
+                line = line.replace("]", "")
+                db_choice_list.append(line)
+
+        return db_choice_list
+
+    def display_info(self, cli_parser):
+        """ Display database setup information. """
+
+        if not self.args.list_databases:
+            if not self.args.sql_file_or_query:
+                cli_parser.print_help()
+                sys.exit()
+            else:
+                return
+
+        print("Here is a list of the databases you have configured:")
+        print()
+        with open(PROP_FILE, "r") as file:
+            for line in file:
+                line = line.strip()
+
+                if line.startswith("#"):
+                    continue
+
+                if line.startswith("["):
+                    line = line.replace("[db.", "")
+                    line = line.replace("]", "")
+
+                    if line == "default":
+                        print(
+                            "    default  "
+                            +"<-- This is the default database you "
+                            +"do not need to specify this"
+                        )
+                    else:
+                        print(f"    {line}")
+
+                else:
+                    prop = re.sub(".*=", "", line)
+
+                    if ".driver=" in line:
+                        print(f"        Driver class : {prop}")
+                    elif ".driverpath=" in line:
+                        driver_file = Path(prop)
+
+                        if not driver_file.is_file():
+                            print()
+                            print("    <<<<<<<< ERROR: DRIVER FILE IS MISSING >>>>>>>>")
+                        else:
+                            print(f"        Driver file  : {prop}")
+
+        sys.exit(1)
+
+    def process_to_xlsx_file(self):
+        global tab_title
+        """ Uses: https://xlsxwriter.readthedocs.io/ """
+
+        worksheet = self.workbook.add_worksheet(tab_title)
+        format_bold_12 = self.workbook.add_format({"bold": True, "font_size": "12"})
+        format_bold_12_inverted = self.workbook.add_format(
+            {"bold": True, "font_size": "12", "bg_color": "silver"}
+        )
+
+        y_pos = 0
+        # Show the query?
+        if self.args.show_query or self.args.verbose:
+            worksheet.write(y_pos, 0, "Query:", format_bold_12)
+            worksheet.write(y_pos, 1, QueryCli.clean_query(self.args.sql_file_or_query))
+            y_pos += 1
+
+        # Show the time?
+        if self.args.show_time or self.args.verbose:
+            cell_time_format = self.workbook.add_format(
+                {"num_format": "yyyy-mm-dd hh:mm:ss.000"}
+            )
+            worksheet.write(y_pos, 0, "Date:", format_bold_12)
+            worksheet.write(y_pos, 1, datetime.now(), cell_time_format)
+            worksheet.set_column(1, 1, 30)
+            y_pos += 1
+
+        # Show the count?
+        if self.args.count or self.args.verbose:
+            count_y_pos = y_pos
+            y_pos += 1
+
+        # Leave a gap if any info displayed.
+        if y_pos > 0:
+            y_pos += 1
+
+        #  Header row.
+        x_pos = 0
+
+        for colname in self.cursor.description:
+            worksheet.write(y_pos, x_pos, colname[0], format_bold_12_inverted)
+            x_pos += 1
+
+        # Data
+        top_y_pos = y_pos
+        y_pos += 1
+        num_rows = 0
+        for row in self.cursor.fetchall():
+            x_pos = 0
+
+            for col in row:
+                worksheet.write(y_pos, x_pos, col)
+                x_pos += 1
+
+            y_pos += 1
+            num_rows += 1
+
+        # Counter
+        if self.args.count or self.args.verbose:
+            worksheet.write(count_y_pos, 0, "#rows:", format_bold_12)
+            worksheet.write(count_y_pos, 1, num_rows)
+
+        worksheet.autofilter(top_y_pos, 0, y_pos - 1, x_pos - 1)
+
+        return num_rows
+
+    def process_sql_file(self):
+        global tab_title
+        """Read sql commands from file and run each"""
+        file = Path(self.args.sql_file_or_query)
+
+        if file.exists() and file.is_file():
+            if self.args.verbose:
+                print(f"Reading input from SQL file {self.args.sql_file_or_query}...")
+        else:
+            print(
+                f"ERROR: Reading input from SQL file {self.args.sql_file_or_query}... "
+                +"does not exist or is not a file"
+            )
+
+            sys.exit(1)
+
+        sql_file = file.open()
+        query = ""
+        tab_title = ""
+
+        for line in sql_file:
+            if line.strip().startswith("-- TABNAME:"):
+                tab_title = line.strip()[11:].strip()
+                self.output_line(line)
+            elif line.strip().startswith("--") or line.strip() == "":
+                self.output_line(line)
+            else:
+                query += line
+
+                if query.strip().endswith(";"):
+                    self.args.sql_file_or_query = query.strip()[:-1]
+                    self.process()
+                    query = ""
+
+    # Uses: https://pypi.org/project/tabulate/
+    def process_tabbed(self, output, no_header, format_style):
+        """Output as TSV file"""
+        header = []
+
+        if not no_header:
+            for colname in self.cursor.description:
+                header.append(colname[0])
+
+        json_str = self.cursor.fetchall()
+
+        if output == "":
+            #  print(tabulate(json_str, header, tablefmt=format_style, floatfmt=".4f"))
+            print(tabulate(json_str, header, tablefmt=format_style))
+        else:
+            #  self.out_file.write(tabulate(json_str, header,
+            #  tablefmt=format_style, floatfmt=".4f"))
+            self.out_file.write(tabulate(json_str, header, tablefmt=format_style))
+
+        return len(json_str)
+
+    def process_to_csv(self, verbose, no_header):
+        """Output as CSV file"""
+        if no_header:
+            if verbose:
+                print("Without header")
+        else:
+            first = True
+            for colname in self.cursor.description:
+                if first:
+                    self.out_file.write(f'"{colname[0]}"')
+                else:
+                    self.out_file.write(f',"{colname[0]}"')
+                first = False
+            self.out_file.write("\n")
+
+        count = 0
+        for row in self.cursor.fetchall():
+            json_str = json.dumps(row)
+            json_str = json_str.replace("[", "")
+            json_str = json_str.replace("]", "\n")
+            self.out_file.write(json_str)
+            count += 1
+
+        return count
+
+    @staticmethod
+    def extract_table_name_from_query(query):
+        """Get the table name, naive but works for me."""
+        table_name = re.sub(".* from ", "", query, flags=re.IGNORECASE)
+        table_name = re.sub(" where .*", "", table_name, flags=re.IGNORECASE)
+        return table_name.strip()
+
+    def process_to_sql_file(self):
+        """Output to sql file of insert statements"""
+        first = True
+
+        self.out_file.write(f"INSERT INTO\n  {self.args.table_name} (")
+
+        for colname in self.cursor.description:
+            if first:
+                self.out_file.write(f"{colname[0]}")
+            else:
+                self.out_file.write(f",{colname[0]}")
+            first = False
+
+        self.out_file.write(")\nVALUES\n")
+        first = True
+        count = 0
+
+        for row in self.cursor.fetchall():
+            if first:
+                first = False
+            else:
+                self.out_file.write(",\n")
+
+            json_str = json.dumps(row)
+            json_str = json_str.replace("[", "(")
+            json_str = json_str.replace("]", ")")
+            self.out_file.write(json_str)
+            count += 1
+
+        self.out_file.write(";\n")
+        return count
+
+    def process_to_json(self, output):
+        """Output to json format"""
+
+        names = []
+        for colname in self.cursor.description:
+            names.append(colname[0].lower())
+        first = True
+        count = 0
+
+        if output == "":
+            self.out_file = sys.stdout
+
+        self.out_file.write("{")
+        self.out_file.write(f" \"table\": \"{self.args.table_name}\",")
+        self.out_file.write(" \"tableData\": [")
+
+        for f in self.cursor.fetchall():
+            count += 1
+            d = {}
+            for i, j in zip(names, f):
+                d[i] = j
+
+            if not first:
+                self.out_file.write(",")
+
+            self.out_file.write(json.dumps(d))
+            first = False
+
+        self.out_file.write("]}")
+
+        return count
+
+    @staticmethod
+    def is_sql_file(a_string):
+        """ Is this a SQL file and does it exist? """
+        if a_string.strip().endswith("sql"):
+            file = Path(a_string)
+
+            if file.exists() and file.is_file():
+                return True
+
+        return False
+
+    def process_to_file(self):
+        """ Output to correct file based on file type """
+        count = 0
+
+        # Process according to the requested file type
+        if self.is_a_file_of_type(["csv"]):
+            count = self.process_to_csv(self.args.verbose, self.args.no_header)
+        elif self.is_a_file_of_type(["sql"]):
+            count = self.process_to_sql_file()
+        elif self.is_a_file_of_type(["xlsx"]):
+            count = self.process_to_xlsx_file()
+        elif self.is_a_file_of_type(["html"]):
+            count = self.process_tabbed(self.args.output, self.args.no_header, "html")
+        elif self.is_a_file_of_type(["json"]):
+            count = self.process_to_json(self.args.output)
+
+        return count
+
+    def open_files(self):
+        """ Open the files and generate headers, if any """
+        if self.args.output == "":
+            return
+
+        ext = Path(self.args.output).suffix.upper().replace(".", "")
+
+        if self.args.verbose:
+            print(f'Writing results to {ext} file "{self.args.output}"')
+
+        if self.is_a_file_of_type(["xlsx"]):
+            self.workbook = xlsxwriter.Workbook(self.args.output)
+        elif self.is_a_file_of_type(["csv", "sql", "json"]):
+            self.out_file = open(self.args.output, "a")
+        elif self.is_a_file_of_type(["html"]):
+            self.out_file = open(self.args.output, "w")
+            self.out_file.write(
+                """<!DOCTYPE html>
+    <html>
+    <head>
+    <style type="text/css">
+        td {
+            border-width: 1px;
+            padding: 1px;
+            border-style: solid;
+            border-color: #3A3A3A;
+            text-align: center;
+        }
+        th {
+            border-width: 1px;
+            padding: 2px;
+            border-style: solid;
+            border-color: #3A3A3A;
+            background-color: #A3A3A3;
+            text-align: center;
+        }
+        table {
+            font-family: verdana,arial,sans-serif;
+            font-size:11px;
+            color:#333333;
+            border-width: 1px;
+            border-color: #3A3A3A;
+            border-collapse: collapse;
+        }
+        table tr:nth-child(even) td{
+            background-color: #e8e8e8;
+        }
+    </style>
+    </head>
+    <body>
+    """
+            )
+
+    def close_files(self):
+        """ Close the files. """
+        if self.is_a_file_of_type(["html"]):
+            self.out_file.write("</body>\n</html>")
+
+        if self.workbook is not None:
+            self.workbook.close()
+
+        if self.out_file is not None:
+            self.out_file.close()
+
+    def process(self):
+        """Process everything"""
+        if QueryCli.is_sql_file(self.args.sql_file_or_query):
+            self.process_sql_file()
+        else:
+            if self.args.show_query or self.args.verbose:
+                self.output_line(self.args.sql_file_or_query)
+
+            if self.args.show_time or self.args.verbose:
+                self.output_line(datetime.now())
+
+            command = self.args.sql_file_or_query.strip()
+
+            try:
+                self.cursor.execute(command)
+            except Exception as exception:
+                print(exception)
+                sys.exit(1)
+
+            if not self.args.table_name:
+                self.args.table_name = QueryCli.extract_table_name_from_query(self.args.sql_file_or_query)
+            count = 0
+
+            if command.lower().startswith("select"):
+                if self.args.output != "":
+                    count = self.process_to_file()
+                elif self.args.json:
+                    count = self.process_to_json("")
+                elif self.args.simple:
+                    count = self.process_tabbed("", self.args.no_header, "simple")
+                else:
+                    count = self.process_tabbed(
+                        "", self.args.no_header, self.args.format
+                    )
+
+                if self.args.count or self.args.verbose:
+                    self.output_line(count)
+
+    @staticmethod
+    def setup_command_line_parser():
+        """Define command line syntax and elements.
+        Uses: https://docs.python.org/3/library/argparse.html"""
+        parser = argparse.ArgumentParser(
+            description=f"%(prog)s - {QUERY_VERSION}"
+            +" - Jim Cornmell"
+            +" - A versatile command line query tool"
+            +f" - DB connection properties are read from {PROP_FILE}"
+        )
+        parser.add_argument(
+            "--version", action="version", version=f"%(prog)s {QUERY_VERSION}"
+        )
+        parser.add_argument(
+            "-d",
+            "--database",
+            choices=QueryCli.db_choices(),
+            help="Database to run queries against",
+            default="default",
+        )
+        parser.add_argument(
+            "-n",
+            "--no-header",
+            help="no header, default prints header row",
+            action="store_true",
+        )
+        parser.add_argument(
+            "-a",
+            "--table-name",
+            help="specifies the name of the table if generating inserts",
+            default="",
+        )
+        parser.add_argument(
+            "-c", "--count", help="output total number of rows", action="store_true"
+        )
+        parser.add_argument(
+            "-s", "--show-query", help="Show the query", action="store_true"
+        )
+        parser.add_argument(
+            "-t",
+            "--show-time",
+            help="Show the time at which the query ran",
+            action="store_true",
+        )
+        parser.add_argument(
+            "-v", "--verbose", help="Show the count, query, time", action="store_true"
+        )
+        group = parser.add_mutually_exclusive_group()
+        group.add_argument("-j", "--json", help="output Json", action="store_true")
+        group.add_argument("-m", "--simple", help="siMple format", action="store_true")
+        group.add_argument(
+            "-f",
+            "--format",
+            default="fancy_grid",
+            help="Format, options are listed",
+            choices=[
+                "plain",
+                "simple",
+                "github",
+                "grid",
+                "fancy_grid",
+                "pipe",
+                "orgtbl",
+                "jira",
+                "presto",
+                "pretty",
+                "psql",
+                "rst",
+                "mediawiki",
+                "moinmoin",
+                "youtrack",
+                "html",
+                "latex",
+                "latex_raw",
+                "latex_booktabs",
+                "textile",
+            ],
+        )
+        group.add_argument(
+            "-o",
+            "--output",
+            help="Output as CSV, XLSX, SQL, HTML, JSON file",
+            default="",
+        )
+        parser.add_argument(
+            "-l",
+            "--list-databases",
+            help="Show the possible databases",
+            action="store_true",
+        )
+        parser.add_argument(
+            "sql_file_or_query",
+            help="A query or sql file to run",
+            nargs="?",
+            default="",
+        )
+        return parser
+
+    def db_connect(self):
+        """Connect to the database, uses: https://pypi.org/project/JayDeBeApi/
+        Also used this to read config:
+        Uses: https://docs.python.org/3/library/configparser.html
+        """
+
+        db_name = "db." + self.args.database
+        config = configparser.RawConfigParser()
+        config.read(PROP_FILE)
+        driver = config.get(db_name, db_name + ".driver")
+
+        connection = jaydebeapi.connect(
+            driver,
+            config.get(db_name, db_name + ".url"),
+            [
+                config.get(db_name, db_name + ".username"),
+                config.get(db_name, db_name + ".password"),
+            ],
+            config.get(db_name, db_name + ".driverpath"),
+        )
+
+        return connection
+
+
+def main():
+    """ Main! """
+
+    prop_file = Path(PROP_FILE)
+
+    if not prop_file.is_file():
+        print(f"ERROR: Properties file is missing: {PROP_FILE}")
+        sys.exit(1)
+
+    query_cli = QueryCli()
+    cli_parser = QueryCli.setup_command_line_parser()
+    query_cli.set_args(cli_parser.parse_args())
+    query_cli.display_info(cli_parser)
+    db_connection = query_cli.db_connect()
+    query_cli.cursor = db_connection.cursor()
+    query_cli.open_files()
+    query_cli.process()
+    query_cli.cursor.close()
+    db_connection.close()
+    query_cli.close_files()
+
+
+if __name__ == "__main__":
+    main()
