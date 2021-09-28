@@ -135,11 +135,16 @@ class QueryCli:
 
         sys.exit(1)
 
-    def process_to_xlsx_file(self):
+    def process_to_xlsx_file(self, row_count):
         global tab_title
         """ Uses: https://xlsxwriter.readthedocs.io/ """
 
-        worksheet = self.workbook.add_worksheet(tab_title)
+        name=tab_title
+
+        if row_count != None and row_count > 0:
+            name=f"{tab_title}={row_count}"
+
+        worksheet = self.workbook.add_worksheet(name[-31:])
         format_bold_12 = self.workbook.add_format({"bold": True, "font_size": "12"})
         format_bold_12_inverted = self.workbook.add_format(
             {"bold": True, "font_size": "12", "bg_color": "silver"}
@@ -292,7 +297,7 @@ class QueryCli:
         """Output to sql file of insert statements"""
         first = True
 
-        self.out_file.write(f"INSERT INTO\n  {self.args.table_name} (")
+        self.out_file.write(f"INSERT IGNORE INTO\n  {self.args.table_name} (")
 
         for colname in self.cursor.description:
             if first:
@@ -363,7 +368,7 @@ class QueryCli:
 
         return False
 
-    def process_to_file(self):
+    def process_to_file(self, row_count):
         """ Output to correct file based on file type """
         count = 0
 
@@ -373,7 +378,7 @@ class QueryCli:
         elif self.is_a_file_of_type(["sql"]):
             count = self.process_to_sql_file()
         elif self.is_a_file_of_type(["xlsx"]):
-            count = self.process_to_xlsx_file()
+            count = self.process_to_xlsx_file(row_count)
         elif self.is_a_file_of_type(["html"]):
             count = self.process_tabbed(self.args.output, self.args.no_header, "html")
         elif self.is_a_file_of_type(["json"]):
@@ -457,20 +462,30 @@ class QueryCli:
                 self.output_line(datetime.now())
 
             command = self.args.sql_file_or_query.strip()
+            row_count=0
 
             try:
+                if self.args.output != "":
+                    self.cursor.execute(command)
+
+                    # Get the number of rows for the sheet name, as I cannot set this later :-(
+                    for row in self.cursor.fetchall():
+                        row_count+=1
+
                 self.cursor.execute(command)
+                print("%d"%row_count)
             except Exception as exception:
                 print(exception)
                 sys.exit(1)
 
             if not self.args.table_name:
                 self.args.table_name = QueryCli.extract_table_name_from_query(self.args.sql_file_or_query)
+
             count = 0
 
             if command.lower().startswith("select"):
                 if self.args.output != "":
-                    count = self.process_to_file()
+                    count = self.process_to_file(row_count)
                 elif self.args.json:
                     count = self.process_to_json("")
                 elif self.args.simple:
@@ -539,26 +554,10 @@ class QueryCli:
             default="fancy_grid",
             help="Format, options are listed",
             choices=[
-                "plain",
-                "simple",
-                "github",
-                "grid",
-                "fancy_grid",
-                "pipe",
-                "orgtbl",
-                "jira",
-                "presto",
-                "pretty",
-                "psql",
-                "rst",
-                "mediawiki",
-                "moinmoin",
-                "youtrack",
-                "html",
-                "latex",
-                "latex_raw",
-                "latex_booktabs",
-                "textile",
+                "plain", "simple", "github", "grid", "fancy_grid",
+                "pipe", "orgtbl", "jira", "presto", "pretty",
+                "psql", "rst", "mediawiki", "moinmoin", "youtrack",
+                "html", "latex", "latex_raw", "latex_booktabs", "textile",
             ],
         )
         group.add_argument(
