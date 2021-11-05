@@ -163,7 +163,6 @@ class QueryCli:
         global tab_sheet_new_names
         """ Uses: https://xlsxwriter.readthedocs.io/ """
 
-        print(f"OO {self.args.output}")
         worksheet = self.workbook.add_worksheet(tab_title)
         format_bold_12 = self.workbook.add_format({"bold": True, "font_size": "12"})
         format_bold_12_inverted = self.workbook.add_format(
