@@ -14,16 +14,25 @@ import argparse
 from datetime import datetime
 import json
 from pathlib import Path
+import os
 import re
 import sys
-from tabulate import tabulate
 
+# https://openpyxl.readthedocs.io/en/stable/#
+import openpyxl
+# https://github.com/astanin/python-tabulate
+from tabulate import tabulate
+# https://docs.python.org/3/library/configparser.html#module-configparser
 import configparser
+# https://github.com/baztian/jaydebeapi
 import jaydebeapi
+# https://xlsxwriter.readthedocs.io/
 import xlsxwriter
 
 ###############################################################################
 tab_title = ""
+tab_sheet_names=[]
+tab_sheet_new_names=[]
 PROP_FILE = str(Path.home()) + "/.ssh/secret_keys/query.properties"
 QUERY_VERSION = "v0.1"
 
@@ -32,14 +41,27 @@ class QueryCli:
     """ Command line tool """
 
     def __init__(self):
+        self.out_file = sys.stdout
         self.workbook = None
-        self.out_file = None
-        self.args = None
         self.cursor = None
+        self.args.database=""
+        self.args.format=""
+        self.args.json=""
+        self.args.list_databases=""
+        self.args.no_header=""
+        self.args.output=""
+        self.args.simple=""
+        self.args.sql_file_or_query=""
+        self.args.table_name=""
+        self.args.verbose=False
 
     def set_args(self, some_args):
         """ Setup arguments. """
         self.args = some_args
+
+    def log(self, text):
+        if self.args.verbose:
+            print(text)
 
     @staticmethod
     def clean_query(aquery):
@@ -135,16 +157,14 @@ class QueryCli:
 
         sys.exit(1)
 
-    def process_to_xlsx_file(self, row_count):
+    def process_to_xlsx_file(self):
         global tab_title
+        global tab_sheet_names
+        global tab_sheet_new_names
         """ Uses: https://xlsxwriter.readthedocs.io/ """
 
-        name=tab_title
-
-        if row_count != None and row_count > 0:
-            name=f"{tab_title}={row_count}"
-
-        worksheet = self.workbook.add_worksheet(name[-31:])
+        print(f"OO {self.args.output}")
+        worksheet = self.workbook.add_worksheet(tab_title)
         format_bold_12 = self.workbook.add_format({"bold": True, "font_size": "12"})
         format_bold_12_inverted = self.workbook.add_format(
             {"bold": True, "font_size": "12", "bg_color": "silver"}
@@ -203,6 +223,8 @@ class QueryCli:
             worksheet.write(count_y_pos, 1, num_rows)
 
         worksheet.autofilter(top_y_pos, 0, y_pos - 1, x_pos - 1)
+        tab_sheet_names.append(tab_title)
+        tab_sheet_new_names.append(f"{tab_title}={num_rows}"[-31:])
 
         return num_rows
 
@@ -228,7 +250,7 @@ class QueryCli:
 
         for line in sql_file:
             if line.strip().startswith("-- TABNAME:"):
-                tab_title = line.strip()[11:].strip()
+                tab_title = line.strip()[11:].strip()[-31:]
                 self.output_line(line)
             elif line.strip().startswith("--") or line.strip() == "":
                 self.output_line(line)
@@ -325,6 +347,23 @@ class QueryCli:
         self.out_file.write(";\n")
         return count
 
+    def process_to_object(self):
+        """Return object"""
+        command = self.args.sql_file_or_query.strip()
+        self.cursor.execute(command)
+        names = []
+        for colname in self.cursor.description:
+            names.append(colname[0].lower())
+        theObject=[]
+
+        for f in self.cursor.fetchall():
+            d = {}
+            for i, j in zip(names, f):
+                d[i] = j
+            theObject.append(d)
+
+        return theObject
+
     def process_to_json(self, output):
         """Output to json format"""
 
@@ -368,7 +407,7 @@ class QueryCli:
 
         return False
 
-    def process_to_file(self, row_count):
+    def process_to_file(self):
         """ Output to correct file based on file type """
         count = 0
 
@@ -378,7 +417,7 @@ class QueryCli:
         elif self.is_a_file_of_type(["sql"]):
             count = self.process_to_sql_file()
         elif self.is_a_file_of_type(["xlsx"]):
-            count = self.process_to_xlsx_file(row_count)
+            count = self.process_to_xlsx_file()
         elif self.is_a_file_of_type(["html"]):
             count = self.process_tabbed(self.args.output, self.args.no_header, "html")
         elif self.is_a_file_of_type(["json"]):
@@ -397,7 +436,7 @@ class QueryCli:
             print(f'Writing results to {ext} file "{self.args.output}"')
 
         if self.is_a_file_of_type(["xlsx"]):
-            self.workbook = xlsxwriter.Workbook(self.args.output)
+            self.workbook = xlsxwriter.Workbook(self.args.output + ".tmp.xlsx")
         elif self.is_a_file_of_type(["csv", "sql", "json"]):
             self.out_file = open(self.args.output, "a")
         elif self.is_a_file_of_type(["html"]):
@@ -446,6 +485,13 @@ class QueryCli:
 
         if self.workbook is not None:
             self.workbook.close()
+            # Cannot change the names of sheets in xlsxwriter, so use openpyxl to rename on copy.
+            ss = openpyxl.load_workbook(self.args.output+".tmp.xlsx")
+            for old_name, new_name in zip(tab_sheet_names, tab_sheet_new_names):
+                ss_sheet = ss[old_name]
+                ss_sheet.title = new_name
+            ss.save(self.args.output)
+            os.remove(self.args.output+".tmp.xlsx")
 
         if self.out_file is not None:
             self.out_file.close()
@@ -462,18 +508,9 @@ class QueryCli:
                 self.output_line(datetime.now())
 
             command = self.args.sql_file_or_query.strip()
-            row_count=0
 
             try:
-                if self.args.output != "":
-                    self.cursor.execute(command)
-
-                    # Get the number of rows for the sheet name, as I cannot set this later :-(
-                    for row in self.cursor.fetchall():
-                        row_count+=1
-
                 self.cursor.execute(command)
-                print("%d"%row_count)
             except Exception as exception:
                 print(exception)
                 sys.exit(1)
@@ -485,7 +522,7 @@ class QueryCli:
 
             if command.lower().startswith("select"):
                 if self.args.output != "":
-                    count = self.process_to_file(row_count)
+                    count = self.process_to_file()
                 elif self.args.json:
                     count = self.process_to_json("")
                 elif self.args.simple:
@@ -560,7 +597,7 @@ class QueryCli:
                 "html", "latex", "latex_raw", "latex_booktabs", "textile",
             ],
         )
-        group.add_argument(
+        parser.add_argument(
             "-o",
             "--output",
             help="Output as CSV, XLSX, SQL, HTML, JSON file",
@@ -603,10 +640,8 @@ class QueryCli:
 
         return connection
 
-
-def main():
-    """ Main! """
-
+# Run and return an object.
+def runObject(args):
     prop_file = Path(PROP_FILE)
 
     if not prop_file.is_file():
@@ -615,7 +650,36 @@ def main():
 
     query_cli = QueryCli()
     cli_parser = QueryCli.setup_command_line_parser()
-    query_cli.set_args(cli_parser.parse_args())
+    query_cli.set_args(cli_parser.parse_args(args))
+    db_connection = query_cli.db_connect()
+    query_cli.cursor = db_connection.cursor()
+    theObject = query_cli.process_to_object()
+    query_cli.cursor.close()
+    db_connection.close()
+
+    return theObject
+
+# Run with either None (in which case the cli is read, see below),
+# or with an array.
+#
+# e.g:
+#      query.run(['-d', 'readreplica.live.ro', queryStr])
+#
+#      queryStr="SELECT week_number,year_number FROM billing.week_numbers WHERE closed='N' ORDER BY year_number,week_number LIMIT 1"
+#      theObject=query.runObject(['-d', DB_NAME, queryStr])
+#      week=theObject[0]['week_number']
+#      year=theObject[0]['year_number']
+#
+def run(args):
+    prop_file = Path(PROP_FILE)
+
+    if not prop_file.is_file():
+        print(f"ERROR: Properties file is missing: {PROP_FILE}")
+        sys.exit(1)
+
+    query_cli = QueryCli()
+    cli_parser = QueryCli.setup_command_line_parser()
+    query_cli.set_args(cli_parser.parse_args(args))
     query_cli.display_info(cli_parser)
     db_connection = query_cli.db_connect()
     query_cli.cursor = db_connection.cursor()
@@ -625,6 +689,6 @@ def main():
     db_connection.close()
     query_cli.close_files()
 
-
 if __name__ == "__main__":
-    main()
+    run(None)
+
