@@ -44,16 +44,6 @@ class QueryCli:
         self.out_file = sys.stdout
         self.workbook = None
         self.cursor = None
-        self.args.database=""
-        self.args.format=""
-        self.args.json=""
-        self.args.list_databases=""
-        self.args.no_header=""
-        self.args.output=""
-        self.args.simple=""
-        self.args.sql_file_or_query=""
-        self.args.table_name=""
-        self.args.verbose=False
 
     def set_args(self, some_args):
         """ Setup arguments. """
