@@ -151,6 +151,7 @@ class QueryCli:
         global tab_title
         global tab_sheet_names
         global tab_sheet_new_names
+        count_y_pos = 0
         """ Uses: https://xlsxwriter.readthedocs.io/ """
 
         worksheet = self.workbook.add_worksheet(tab_title)
@@ -219,6 +220,8 @@ class QueryCli:
 
     def process_sql_file(self):
         global tab_title
+        start_time = datetime.now().strftime("'%Y-%m-%d %H:%M:%S'")
+
         """Read sql commands from file and run each"""
         file = Path(self.args.sql_file_or_query)
 
@@ -244,7 +247,7 @@ class QueryCli:
             elif line.strip().startswith("--") or line.strip() == "":
                 self.output_line(line)
             else:
-                query += line
+                query += line.replace("{{START_TIME}}", start_time);
 
                 if query.strip().endswith(";"):
                     self.args.sql_file_or_query = query.strip()[:-1]
@@ -263,8 +266,9 @@ class QueryCli:
         json_str = self.cursor.fetchall()
 
         if output == "":
-            #  print(tabulate(json_str, header, tablefmt=format_style, floatfmt=".4f"))
-            print(tabulate(json_str, header, tablefmt=format_style))
+            # print(tabulate(json_str, header, tablefmt=format_style))
+            print(re.sub("├.*┼.*┤\n", "", tabulate(json_str, header, tablefmt=format_style)))
+
         else:
             #  self.out_file.write(tabulate(json_str, header,
             #  tablefmt=format_style, floatfmt=".4f"))
