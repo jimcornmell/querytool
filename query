@@ -13,6 +13,7 @@ formats.
 import argparse
 from datetime import datetime
 import json
+from json import JSONEncoder, dumps
 from pathlib import Path
 import os
 import re
@@ -36,6 +37,13 @@ tab_sheet_new_names=[]
 PROP_FILE = str(Path.home()) + "/.ssh/secret_keys/query.properties"
 QUERY_VERSION = "v0.1"
 
+class SafeSerializer(JSONEncoder):
+    def default(self, value) -> str:
+        try:
+            return super(SafeSerializer, self).default(value)
+
+        except Exception:
+            return str(value)
 
 class QueryCli:
     """ Command line tool """
@@ -136,6 +144,10 @@ class QueryCli:
 
                     if ".driver=" in line:
                         print(f"        Driver class : {prop}")
+                    elif ".username=" in line:
+                        print(f"        Username     : {prop}")
+                    elif ".url=" in line:
+                        print(f"        URL          : {prop}")
                     elif ".driverpath=" in line:
                         driver_file = Path(prop)
 
@@ -201,7 +213,7 @@ class QueryCli:
             x_pos = 0
 
             for col in row:
-                worksheet.write(y_pos, x_pos, col)
+                worksheet.write(y_pos, x_pos, str(col))
                 x_pos += 1
 
             y_pos += 1
@@ -382,7 +394,7 @@ class QueryCli:
             if not first:
                 self.out_file.write(",")
 
-            self.out_file.write(json.dumps(d))
+            self.out_file.write(json.dumps(d, cls=SafeSerializer))
             first = False
 
         self.out_file.write("]}")
