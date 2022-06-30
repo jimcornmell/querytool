@@ -29,7 +29,7 @@ _query () {
       COMPREPLY=( $(compgen -W "${formats}" -- ${cur}) )
       ;;
     -o|--output)
-      local outputs="output_file.csv output_file.xlsx output_file.sql output_file.html output_file.json"
+      local outputs="output_file.csv output_file.tsv output_file.xlsx output_file.sql output_file.html output_file.json"
       COMPREPLY=( $(compgen -W "${outputs}" -- ${cur}) )
       ;;
     *)

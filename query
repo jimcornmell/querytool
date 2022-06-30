@@ -10,15 +10,22 @@ formats.
 
 """
 
+# Imports {{{
 import argparse
 from datetime import datetime
 import json
-from json import JSONEncoder, dumps
+# from json import JSONEncoder, dumps
+from json import JSONEncoder
 from pathlib import Path
 import os
 import re
 import sys
 
+# https://github.com/Textualize/rich
+from rich.table import Table
+from rich import box
+from rich.console import Console
+from rich.traceback import install
 # https://openpyxl.readthedocs.io/en/stable/#
 import openpyxl
 # https://github.com/astanin/python-tabulate
@@ -29,14 +36,17 @@ import configparser
 import jaydebeapi
 # https://xlsxwriter.readthedocs.io/
 import xlsxwriter
+# }}}
 
-###############################################################################
+PROP_FILE = str(Path.home()) + "/.ssh/secret_keys/query.properties"
+QUERY_VERSION = "v0.2"
+
+install(show_locals=True)
 tab_title = ""
 tab_sheet_names=[]
 tab_sheet_new_names=[]
-PROP_FILE = str(Path.home()) + "/.ssh/secret_keys/query.properties"
-QUERY_VERSION = "v0.1"
 
+# Safe SafeSerializer {{{
 class SafeSerializer(JSONEncoder):
     def default(self, value) -> str:
         try:
@@ -44,25 +54,33 @@ class SafeSerializer(JSONEncoder):
 
         except Exception:
             return str(value)
+# }}}
 
+# Main Class {{{1
 class QueryCli:
     """ Command line tool """
 
-    def __init__(self):
-        self.out_file = sys.stdout
-        self.workbook = None
-        self.cursor = None
+    def __init__(self, *args):
+        global argParser, console
+        console = Console(color_system="auto")
+        argParser = self.setupCommandLineParser()
 
-    def set_args(self, some_args):
-        """ Setup arguments. """
-        self.args = some_args
+        if not args:
+            self.args = argParser.parse_args()
+        else:
+            self.args = argParser.parse_args(args)
+
+        self.out_file = sys.stdout
+        self.checkPropFileExists()
+        self.db_connect()
+        # self.workbook = None
+        # self.cursor = None
 
     def log(self, text):
         if self.args.verbose:
             print(text)
 
-    @staticmethod
-    def clean_query(aquery):
+    def clean_query(self, aquery):
         """ Cleanup a query """
         return aquery.replace("\n", " ").replace("  ", " ").strip()
 
@@ -107,18 +125,12 @@ class QueryCli:
 
         return db_choice_list
 
-    def display_info(self, cli_parser):
+    def list_databases(self):
         """ Display database setup information. """
-
-        if not self.args.list_databases:
-            if not self.args.sql_file_or_query:
-                cli_parser.print_help()
-                sys.exit()
-            else:
-                return
 
         print("Here is a list of the databases you have configured:")
         print()
+
         with open(PROP_FILE, "r") as file:
             for line in file:
                 line = line.strip()
@@ -159,6 +171,17 @@ class QueryCli:
 
         sys.exit(1)
 
+    def display_info(self):
+        if self.args.verbose:
+            print(self.args)
+
+        if self.args.list_databases:
+            self.list_databases()
+
+        if self.args.sql_file_or_query == "":
+            argParser.print_help()
+            sys.exit()
+
     def process_to_xlsx_file(self):
         global tab_title
         global tab_sheet_names
@@ -176,7 +199,7 @@ class QueryCli:
         # Show the query?
         if self.args.show_query or self.args.verbose:
             worksheet.write(y_pos, 0, "Query:", format_bold_12)
-            worksheet.write(y_pos, 1, QueryCli.clean_query(self.args.sql_file_or_query))
+            worksheet.write(y_pos, 1, self.clean_query(self.args.sql_file_or_query))
             y_pos += 1
 
         # Show the time?
@@ -266,52 +289,95 @@ class QueryCli:
                     self.process()
                     query = ""
 
-    # Uses: https://pypi.org/project/tabulate/
+    def process_rich(self, no_header, format_style):
+        count = 0
+        table = Table(show_header=True,
+                  show_edge=False,
+                  expand=True,
+                  padding=(0,0),
+                  pad_edge=False,
+                  box=box.SQUARE,
+                  header_style="bold yellow1 on #2f2f2f",
+                  style="#999999 on #2f2f2f",
+                  row_styles=["bold white on #2f2f2f", "bold #999999 on #2f2f2f"])
+
+        if not no_header:
+            for colname in self.cursor.description:
+                table.add_column(colname[0], justify="center")
+
+        data = self.cursor.fetchall()
+
+        for row in data:
+            line=[]
+
+            for col in row:
+                line.append(str(col))
+
+            table.add_row(*line)
+            count += 1
+
+        console.print(table)
+
+        return count
+
     def process_tabbed(self, output, no_header, format_style):
-        """Output as TSV file"""
+        if output == "":
+            return self.process_rich(no_header, format_style)
+
+        count = 0
         header = []
+        # print(re.sub("├.*┼.*┤\n", "", tabulate(data, header, tablefmt=format_style)))
 
         if not no_header:
             for colname in self.cursor.description:
                 header.append(colname[0])
 
-        json_str = self.cursor.fetchall()
+        data = self.cursor.fetchall()
+        self.out_file.write(tabulate(data, header, tablefmt=format_style))
 
-        if output == "":
-            # print(tabulate(json_str, header, tablefmt=format_style))
-            print(re.sub("├.*┼.*┤\n", "", tabulate(json_str, header, tablefmt=format_style)))
+        return count
 
-        else:
-            #  self.out_file.write(tabulate(json_str, header,
-            #  tablefmt=format_style, floatfmt=".4f"))
-            self.out_file.write(tabulate(json_str, header, tablefmt=format_style))
+    def process_to_sep(self, verbose, no_header, sep):
+        """Output as CSV or TSV file"""
 
-        return len(json_str)
-
-    def process_to_csv(self, verbose, no_header):
-        """Output as CSV file"""
         if no_header:
             if verbose:
                 print("Without header")
         else:
             first = True
+
             for colname in self.cursor.description:
                 if first:
                     self.out_file.write(f'"{colname[0]}"')
                 else:
-                    self.out_file.write(f',"{colname[0]}"')
+                    self.out_file.write(sep)
+                    self.out_file.write(f'"{colname[0]}"')
+
                 first = False
+
             self.out_file.write("\n")
 
         count = 0
         for row in self.cursor.fetchall():
-            json_str = json.dumps(row)
-            json_str = json_str.replace("[", "")
-            json_str = json_str.replace("]", "\n")
-            self.out_file.write(json_str)
+            line=""
+
+            for col in row:
+                if line != "":
+                    line += sep + " "
+
+                line += "\"" + str(col) + "\""
+
+            self.out_file.write(line)
+            self.out_file.write("\n")
             count += 1
 
         return count
+
+    def process_to_tsv(self, verbose, no_header):
+        return self.process_to_sep(verbose, no_header, '\t')
+
+    def process_to_csv(self, verbose, no_header):
+        return self.process_to_sep(verbose, no_header, ',')
 
     @staticmethod
     def extract_table_name_from_query(query):
@@ -343,7 +409,12 @@ class QueryCli:
             else:
                 self.out_file.write(",\n")
 
-            json_str = json.dumps(row)
+            line=[]
+
+            for col in row:
+                line.append(str(col))
+
+            json_str = json.dumps(line)
             json_str = json_str.replace("[", "(")
             json_str = json_str.replace("]", ")")
             self.out_file.write(json_str)
@@ -401,11 +472,12 @@ class QueryCli:
 
         return count
 
-    @staticmethod
-    def is_sql_file(a_string):
+    def is_sql_file(self):
         """ Is this a SQL file and does it exist? """
-        if a_string.strip().endswith("sql"):
-            file = Path(a_string)
+        string = str(self.args.sql_file_or_query)
+
+        if string.strip().endswith("sql"):
+            file = Path(string)
 
             if file.exists() and file.is_file():
                 return True
@@ -419,6 +491,8 @@ class QueryCli:
         # Process according to the requested file type
         if self.is_a_file_of_type(["csv"]):
             count = self.process_to_csv(self.args.verbose, self.args.no_header)
+        if self.is_a_file_of_type(["tsv"]):
+            count = self.process_to_tsv(self.args.verbose, self.args.no_header)
         elif self.is_a_file_of_type(["sql"]):
             count = self.process_to_sql_file()
         elif self.is_a_file_of_type(["xlsx"]):
@@ -442,7 +516,7 @@ class QueryCli:
 
         if self.is_a_file_of_type(["xlsx"]):
             self.workbook = xlsxwriter.Workbook(self.args.output + ".tmp.xlsx")
-        elif self.is_a_file_of_type(["csv", "sql", "json"]):
+        elif self.is_a_file_of_type(["csv", "sql", "json", "tsv"]):
             self.out_file = open(self.args.output, "a")
         elif self.is_a_file_of_type(["html"]):
             self.out_file = open(self.args.output, "w")
@@ -483,27 +557,33 @@ class QueryCli:
     """
             )
 
-    def close_files(self):
+    def close_all(self):
         """ Close the files. """
         if self.is_a_file_of_type(["html"]):
             self.out_file.write("</body>\n</html>")
 
-        if self.workbook is not None:
-            self.workbook.close()
-            # Cannot change the names of sheets in xlsxwriter, so use openpyxl to rename on copy.
-            ss = openpyxl.load_workbook(self.args.output+".tmp.xlsx")
-            for old_name, new_name in zip(tab_sheet_names, tab_sheet_new_names):
-                ss_sheet = ss[old_name]
-                ss_sheet.title = new_name
-            ss.save(self.args.output)
-            os.remove(self.args.output+".tmp.xlsx")
+        try:
+            if self.workbook is not None:
+                self.workbook.close()
+                # Cannot change the names of sheets in xlsxwriter, so use openpyxl to rename on copy.
+                ss = openpyxl.load_workbook(self.args.output+".tmp.xlsx")
+                for old_name, new_name in zip(tab_sheet_names, tab_sheet_new_names):
+                    ss_sheet = ss[old_name]
+                    ss_sheet.title = new_name
+                ss.save(self.args.output)
+                os.remove(self.args.output+".tmp.xlsx")
+        except:
+            pass
 
         if self.out_file is not None:
             self.out_file.close()
 
+        self.cursor.close()
+        self.db_connection.close()
+
     def process(self):
         """Process everything"""
-        if QueryCli.is_sql_file(self.args.sql_file_or_query):
+        if self.is_sql_file():
             self.process_sql_file()
         else:
             if self.args.show_query or self.args.verbose:
@@ -512,7 +592,7 @@ class QueryCli:
             if self.args.show_time or self.args.verbose:
                 self.output_line(datetime.now())
 
-            command = self.args.sql_file_or_query.strip()
+            command = str(self.args.sql_file_or_query).strip()
 
             try:
                 self.cursor.execute(command)
@@ -531,17 +611,14 @@ class QueryCli:
                 elif self.args.json:
                     count = self.process_to_json("")
                 elif self.args.simple:
-                    count = self.process_tabbed("", self.args.no_header, "simple")
+                    count = self.process_rich(self.args.no_header, "simple")
                 else:
-                    count = self.process_tabbed(
-                        "", self.args.no_header, self.args.format
-                    )
+                    count = self.process_rich(self.args.no_header, self.args.format)
 
                 if self.args.count or self.args.verbose:
                     self.output_line(count)
 
-    @staticmethod
-    def setup_command_line_parser():
+    def setupCommandLineParser(self):
         """Define command line syntax and elements.
         Uses: https://docs.python.org/3/library/argparse.html"""
         parser = argparse.ArgumentParser(
@@ -605,7 +682,7 @@ class QueryCli:
         parser.add_argument(
             "-o",
             "--output",
-            help="Output as CSV, XLSX, SQL, HTML, JSON file",
+            help="Output as CSV, TSV, XLSX, SQL, HTML, JSON file",
             default="",
         )
         parser.add_argument(
@@ -620,6 +697,7 @@ class QueryCli:
             nargs="?",
             default="",
         )
+
         return parser
 
     def db_connect(self):
@@ -633,7 +711,7 @@ class QueryCli:
         config.read(PROP_FILE)
         driver = config.get(db_name, db_name + ".driver")
 
-        connection = jaydebeapi.connect(
+        self.db_connection = jaydebeapi.connect(
             driver,
             config.get(db_name, db_name + ".url"),
             [
@@ -643,57 +721,44 @@ class QueryCli:
             config.get(db_name, db_name + ".driverpath"),
         )
 
-        return connection
+        self.cursor = self.db_connection.cursor()
 
-# Run and return an object.
-def runObject(args):
-    prop_file = Path(PROP_FILE)
+    def checkPropFileExists(self):
+        if not Path(PROP_FILE).is_file():
+            print(f"ERROR: Properties file is missing: {PROP_FILE}")
+            sys.exit(1)
 
-    if not prop_file.is_file():
-        print(f"ERROR: Properties file is missing: {PROP_FILE}")
-        sys.exit(1)
+    def runQuery(self):
+        self.display_info()
+        self.open_files()
+        self.process()
+        self.close_all()
+# }}}1
 
-    query_cli = QueryCli()
-    cli_parser = QueryCli.setup_command_line_parser()
-    query_cli.set_args(cli_parser.parse_args(args))
-    db_connection = query_cli.db_connect()
-    query_cli.cursor = db_connection.cursor()
-    theObject = query_cli.process_to_object()
-    query_cli.cursor.close()
-    db_connection.close()
-
-    return theObject
-
-# Run with either None (in which case the cli is read, see below),
+# Runners for using as API {{{1
+# Run with either None (in which case the CLI is read, see below),
 # or with an array.
 #
 # e.g:
-#      query.run(['-d', 'readreplica.live.ro', queryStr])
+#      from query import runQuery
+#      runQuery(['SELECT * FROM table'])
+#      runQuery(['-d', 'live.ro', 'SELECT * FROM table'])
 #
-#      queryStr="SELECT week_number,year_number FROM billing.week_numbers WHERE closed='N' ORDER BY year_number,week_number LIMIT 1"
-#      theObject=query.runObject(['-d', DB_NAME, queryStr])
-#      week=theObject[0]['week_number']
-#      year=theObject[0]['year_number']
-#
-def run(args):
-    prop_file = Path(PROP_FILE)
+# or:
+#      from query import runQueryReturnObject
+#      anObject=runQueryReturnObject(['-d', DB_NAME, "SELECT week_number,year_number FROM billing.week_numbers WHERE closed='N' ORDER BY year_number,week_number LIMIT 1" ])
+#      week=anObject[0]['week_number']
+#      year=anObject[0]['year_number']
 
-    if not prop_file.is_file():
-        print(f"ERROR: Properties file is missing: {PROP_FILE}")
-        sys.exit(1)
-
-    query_cli = QueryCli()
-    cli_parser = QueryCli.setup_command_line_parser()
-    query_cli.set_args(cli_parser.parse_args(args))
-    query_cli.display_info(cli_parser)
-    db_connection = query_cli.db_connect()
-    query_cli.cursor = db_connection.cursor()
-    query_cli.open_files()
-    query_cli.process()
-    query_cli.cursor.close()
-    db_connection.close()
-    query_cli.close_files()
+# Run and return an object. {{{2
+# def runQueryReturnObject():
+    # query_cli = QueryCli(None)
+    # theObject = query_cli.process_to_object()
+    # query_cli.close_all()
+    # return theObject
+# }}}2
+# }}}1
 
 if __name__ == "__main__":
-    run(None)
+    QueryCli().runQuery()
 
